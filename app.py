@@ -4,15 +4,24 @@ Copyright (c) Meta Platforms, Inc. and affiliates.
 This source code is licensed under the MIT license found in the
 LICENSE file in the root directory of this source tree.
 """
-import os
+# import pytz
 import sys
+#!/home/azureuser/anaconda3/envs/myenv2/bin/python
+# import sys
+# sys.path.append('/home/azureuser/anaconda3/envs/myenv2/bin/pip')
+
+import os
+import re
+import time
+import uuid
+import shutil
+from uuid import uuid4
 from functools import partial
 from http import HTTPStatus
-from fastapi import FastAPI, File, UploadFile
-from PIL import Image
+from fastapi import FastAPI, File, UploadFile, Form
 from pathlib import Path
-import hashlib
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 import pypdfium2
 import torch
 from nougat import NougatModel
@@ -20,22 +29,40 @@ from nougat.postprocessing import markdown_compatible, close_envs
 from nougat.utils.dataset import ImageDataset
 from nougat.utils.checkpoint import get_checkpoint
 from nougat.dataset.rasterize import rasterize_paper
-from nougat.utils.device import move_to_device, default_batch_size
+from nougat.utils.device import move_to_device
 from tqdm import tqdm
+from utils import get_mongo_collection
+from dotenv import load_dotenv
+from latext import latex_to_text
 
+load_dotenv()
 
-SAVE_DIR = Path("./pdfs")
-BATCHSIZE = int(os.environ.get("NOUGAT_BATCHSIZE", default_batch_size()))
+nougat_pages = get_mongo_collection('nougat_pages')
+nougat_done = get_mongo_collection('nougat_done')
+
+model = None
+SAVE_DIR = Path("../pdfs")
+BATCHSIZE = 6
 NOUGAT_CHECKPOINT = get_checkpoint()
-if NOUGAT_CHECKPOINT is None:
-    print(
-        "Set environment variable 'NOUGAT_CHECKPOINT' with a path to the model checkpoint!"
-    )
-    sys.exit(1)
+print("NOUGAT_CHECKPOINT >>> ", NOUGAT_CHECKPOINT)
 
-app = FastAPI(title="Nougat API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Load the ML model
+    global model, BATCHSIZE, NOUGAT_CHECKPOINT
+    if model is None:
+        model = NougatModel.from_pretrained(NOUGAT_CHECKPOINT)
+        model = move_to_device(model, cuda=BATCHSIZE > 0)
+        if BATCHSIZE <= 0:
+            BATCHSIZE = 1
+        model.eval()
+    yield
+    # Clean up the ML models and release the resources
+    del model
+    torch.cuda.empty_cache()
+
+app = FastAPI(title="Nougat API", lifespan=lifespan)
 origins = ["http://localhost", "http://127.0.0.1"]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -43,20 +70,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-model = None
 
-
-@app.on_event("startup")
-async def load_model(
-    checkpoint: str = NOUGAT_CHECKPOINT,
-):
-    global model, BATCHSIZE
-    if model is None:
-        model = NougatModel.from_pretrained(checkpoint)
-        model = move_to_device(model, cuda=BATCHSIZE > 0)
-        if BATCHSIZE <= 0:
-            BATCHSIZE = 1
-        model.eval()
 
 
 @app.get("/")
@@ -71,23 +85,31 @@ def root():
 
 @app.post("/predict/")
 async def predict(
-    file: UploadFile = File(...), start: int = None, stop: int = None
+    bookId: str = Form(...),
+    bookname: str = Form(...),
+    page_nums: list[str] = Form(...),
+    file: UploadFile = File(...), start: int = None, stop: int = None, skipping: bool = False
 ) -> str:
     """
     Perform predictions on a PDF document and return the extracted text in Markdown format.
 
     Args:
         file (UploadFile): The uploaded PDF file to process.
+        bookId (str): The bookId of the book
+        bookname (str): The name of the book
         start (int, optional): The starting page number for prediction.
         stop (int, optional): The ending page number for prediction.
+        skipping (book, optional): Whether auto detection of out of domain
+            pages should be skipped or not
 
     Returns:
         str: The extracted text in Markdown format.
     """
+    st_time = time.time()
     pdfbin = file.file.read()
     pdf = pypdfium2.PdfDocument(pdfbin)
-    md5 = hashlib.md5(pdfbin).hexdigest()
-    save_path = SAVE_DIR / md5
+    file_unique_id = uuid4().hex
+    save_path = SAVE_DIR / f"{file_unique_id}"
 
     if start is not None and stop is not None:
         pages = list(range(start - 1, stop))
@@ -127,7 +149,7 @@ async def predict(
     for idx, sample in tqdm(enumerate(dataloader), total=len(dataloader)):
         if sample is None:
             continue
-        model_output = model.inference(image_tensors=sample)
+        model_output = model.inference(image_tensors=sample, early_stopping=skipping)
         for j, output in enumerate(model_output["predictions"]):
             if model_output["repeats"][j] is not None:
                 if model_output["repeats"][j] > 0:
@@ -149,25 +171,67 @@ async def predict(
             )
 
     (save_path / "pages").mkdir(parents=True, exist_ok=True)
-    pdf.save(save_path / "doc.pdf")
-    if len(images) > 0:
-        thumb = Image.open(images[0])
-        thumb.thumbnail((400, 400))
-        thumb.save(save_path / "thumb.jpg")
     for idx, page_num in enumerate(pages):
         (save_path / "pages" / ("%02d.mmd" % (page_num + 1))).write_text(
             predictions[idx], encoding="utf-8"
         )
-    final = "".join(predictions).strip()
-    (save_path / "doc.mmd").write_text(final, encoding="utf-8")
-    return final
+    
+    extracted_pdf_directory = save_path
+    pdfId_path = os.path.join(extracted_pdf_directory, 'pages')
+    if os.path.exists(pdfId_path):
+        files = sorted(os.listdir(pdfId_path))
+        pattern = r'(\\\(.*?\\\)|\\\[.*?\\\])'
+        for filename, page_num in zip(files, page_nums):
+            page_equations = []
+            file_path = os.path.join(pdfId_path, filename)
+            latex_text = ""
+            if os.path.isfile(file_path):
+                with open(file_path, 'r', encoding='utf-8') as file:
+                    latex_text = file.read()
+                    latex_text = latex_text.replace("[MISSING_PAGE_POST]", "")
+            def replace_with_uuid(match):
+                equationId = uuid.uuid4().hex
+                match_text = match.group()
+                text_to_speech = latext_to_text_to_speech(match_text)
+                page_equations.append({
+                    'id': equationId,
+                    'text': match_text,
+                    'text_to_speech': text_to_speech
+                })
+                return f'{{{{equation:{equationId}}}}}'
+            page_content = re.sub(pattern, replace_with_uuid, latex_text)
+            page_content = re.sub(r'\s+', ' ', page_content).strip()
+            page_object = {
+                "page_num": page_num,
+                "text": page_content,
+                "tables": [],
+                "figures": [],
+                "page_equations": page_equations
+            }
+            book_document = nougat_pages.find_one({"bookId":  bookId})
+            if book_document:
+                nougat_pages.update_one({"_id": book_document["_id"]}, {"$push": {"pages": page_object}})
+            else:
+                new_book_document = {
+                    "bookId": bookId,
+                    "book": bookname,
+                    "pages": [page_object]
+                }
+                nougat_pages.insert_one(new_book_document)
+        nougat_done.insert_one({"bookId": bookId, "book": bookname, "status": "nougat pages Done"})
+        shutil.rmtree(extracted_pdf_directory)
+    print("Total time taken: {:.2f} seconds".format(time.time() - st_time))
+    return file_unique_id
 
-
-def main():
-    import uvicorn
-
-    uvicorn.run("app:app", port=8503)
+def latext_to_text_to_speech(text):
+    # Remove leading backslashes and add dollar signs at the beginning and end of the text
+    text = "${}$".format(text.lstrip('\\'))
+    # Convert the LaTeX text to text to speech
+    text_to_speech = latex_to_text(text)
+    return text_to_speech
 
 
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    port = int(sys.argv[1])
+    uvicorn.run("app:app", host='0.0.0.0', port=port, reload=True)
