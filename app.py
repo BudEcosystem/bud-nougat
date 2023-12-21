@@ -13,7 +13,6 @@ import sys
 import os
 import re
 import time
-import uuid
 import shutil
 from uuid import uuid4
 from functools import partial
@@ -38,7 +37,6 @@ from latext import latex_to_text
 load_dotenv()
 
 nougat_pages = get_mongo_collection('nougat_pages')
-nougat_done = get_mongo_collection('nougat_done')
 
 model = None
 SAVE_DIR = Path("../pdfs")
@@ -86,7 +84,6 @@ def root():
 @app.post("/predict/")
 async def predict(
     bookId: str = Form(...),
-    bookname: str = Form(...),
     page_nums: list[str] = Form(...),
     file: UploadFile = File(...), start: int = None, stop: int = None, skipping: bool = False
 ) -> str:
@@ -181,6 +178,7 @@ async def predict(
     if os.path.exists(pdfId_path):
         files = sorted(os.listdir(pdfId_path))
         pattern = r'(\\\(.*?\\\)|\\\[.*?\\\])'
+        extracted_nougat_pages = []
         for filename, page_num in zip(files, page_nums):
             page_equations = []
             file_path = os.path.join(pdfId_path, filename)
@@ -190,7 +188,7 @@ async def predict(
                     latex_text = file.read()
                     latex_text = latex_text.replace("[MISSING_PAGE_POST]", "")
             def replace_with_uuid(match):
-                equationId = uuid.uuid4().hex
+                equationId = uuid4().hex
                 match_text = match.group()
                 text_to_speech = latext_to_text_to_speech(match_text)
                 page_equations.append({
@@ -208,17 +206,11 @@ async def predict(
                 "figures": [],
                 "page_equations": page_equations
             }
-            book_document = nougat_pages.find_one({"bookId":  bookId})
-            if book_document:
-                nougat_pages.update_one({"_id": book_document["_id"]}, {"$push": {"pages": page_object}})
-            else:
-                new_book_document = {
-                    "bookId": bookId,
-                    "book": bookname,
-                    "pages": [page_object]
-                }
-                nougat_pages.insert_one(new_book_document)
-        nougat_done.insert_one({"bookId": bookId, "book": bookname, "status": "nougat pages Done"})
+            extracted_nougat_pages.append(page_object)
+            nougat_pages.find_one_and_update(
+                {"bookId": bookId},
+                {"$set": {f"pages.{page_num}": page_object}}
+            )
         shutil.rmtree(extracted_pdf_directory)
     print("Total time taken: {:.2f} seconds".format(time.time() - st_time))
     return file_unique_id
