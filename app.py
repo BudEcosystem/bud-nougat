@@ -172,7 +172,6 @@ async def predict(
         (save_path / "pages" / ("%02d.mmd" % (page_num + 1))).write_text(
             predictions[idx], encoding="utf-8"
         )
-    
     extracted_pdf_directory = save_path
     pdfId_path = os.path.join(extracted_pdf_directory, 'pages')
     if os.path.exists(pdfId_path):
@@ -209,7 +208,8 @@ async def predict(
             extracted_nougat_pages.append(page_object)
             nougat_pages.find_one_and_update(
                 {"bookId": bookId},
-                {"$set": {f"pages.{page_num}": page_object}}
+                {"$set": {f"pages.{page_num}": page_object}},
+                upsert=True
             )
         shutil.rmtree(extracted_pdf_directory)
     print("Total time taken: {:.2f} seconds".format(time.time() - st_time))
