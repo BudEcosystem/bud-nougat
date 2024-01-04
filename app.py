@@ -37,6 +37,9 @@ from latext import latex_to_text
 load_dotenv()
 
 nougat_pages = get_mongo_collection('nougat_pages')
+index_info = nougat_pages.list_indexes()
+if not index_info:
+    nougat_pages.create_index("bookId", background=True)
 
 model = None
 SAVE_DIR = Path("../pdfs")
