@@ -208,7 +208,7 @@ async def predict(
                 "text": page_content,
                 "tables": [],
                 "figures": [],
-                "page_equations": page_equations
+                "equations": page_equations
             }
             extracted_nougat_pages.append(page_object)
             nougat_pages.find_one_and_update(
