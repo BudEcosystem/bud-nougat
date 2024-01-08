@@ -1,0 +1,12 @@
+.env.example
+Dockerfile
+docker
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+LICENSE
+LICENSE-MODEL.md
+MANIFEST.in
+NOTICE
+test.py
+train.py
+.gitignore
