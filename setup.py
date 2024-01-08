@@ -57,7 +57,8 @@ setup(
         "pypdf>=3.1.0",
         "pypdfium2",
         "pymongo",
-        "python-dotenv"
+        "python-dotenv",
+        "latext"
     ],
     extras_require={
         "api": [
