@@ -56,6 +56,8 @@ setup(
         "albumentations>=1.0.0",
         "pypdf>=3.1.0",
         "pypdfium2",
+        "pymongo",
+        "python-dotenv"
     ],
     extras_require={
         "api": [
