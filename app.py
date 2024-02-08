@@ -204,17 +204,23 @@ async def predict(
             page_content = re.sub(pattern, replace_with_uuid, latex_text)
             page_content = re.sub(r'\s+', ' ', page_content).strip()
             page_object = {
-                "page_num": page_num,
+                "page_num": int(page_num),
                 "text": page_content,
                 "tables": [],
                 "figures": [],
                 "equations": page_equations
             }
             extracted_nougat_pages.append(page_object)
-            nougat_pages.find_one_and_update(
-                {"bookId": bookId},
-                {"$set": {f"pages.{page_num}": page_object}},
-                upsert=True
+            # nougat_pages.find_one_and_update(
+            #     {"bookId": bookId},
+            #     {"$set": {f"pages.{page_num}": page_object}},
+            #     upsert=True
+            # )
+            nougat_pages.insert_one(
+                {
+                    "bookId": bookId,
+                    "pages": [page_object]
+                }
             )
         shutil.rmtree(extracted_pdf_directory)
     print("Total time taken: {:.2f} seconds".format(time.time() - st_time))
